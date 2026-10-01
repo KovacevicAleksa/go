@@ -975,6 +975,14 @@ func drawPaletted(dst Image, r image.Rectangle, src image.Image, sp image.Point,
 		pix, stride = p.Pix[p.PixOffset(r.Min.X, r.Min.Y):], p.Stride
 	}
 
+	// A paletteGrid pays off only for large enough images, and smaller
+	// palettes need larger ones. Checking 16 or fewer colors is quick
+	// anyway, and the grid holds palette indexes as bytes.
+	var grid *paletteGrid
+	if n := len(palette); n > 16 && n <= 256 && r.Dx()*r.Dy() >= (1<<20)/n {
+		grid = newPaletteGrid(palette)
+	}
+
 	// quantErrorCurr and quantErrorNext are the Floyd-Steinberg quantization
 	// errors that have been propagated to the pixels in the current and next
 	// rows. The +2 simplifies calculation near the edges.
@@ -1014,14 +1022,24 @@ func drawPaletted(dst Image, r image.Rectangle, src image.Image, sp image.Point,
 			if palette != nil {
 				// Find the closest palette color in Euclidean R,G,B,A space:
 				// the one that minimizes sum-squared-difference.
-				// TODO(nigeltao): consider smarter algorithms.
-				bestIndex, bestSum := 0, uint32(1<<32-1)
-				for index, p := range palette {
-					sum := sqDiff(er, p[0]) + sqDiff(eg, p[1]) + sqDiff(eb, p[2]) + sqDiff(ea, p[3])
-					if sum < bestSum {
-						bestIndex, bestSum = index, sum
-						if sum == 0 {
-							break
+				bestIndex := 0
+				// The grid needs channels in [0, 0xffff], which a buggy
+				// color.Color may not return.
+				if grid != nil && (er|eg|eb|ea)&^0xffff == 0 {
+					// Passing e by pointer stops er, eg, eb and ea being
+					// spilled for every pixel, which slows small palettes.
+					e := [4]int32{er, eg, eb, ea}
+					bestIndex = grid.index(palette, &e)
+					er, eg, eb, ea = e[0], e[1], e[2], e[3]
+				} else {
+					bestSum := uint32(1<<32 - 1)
+					for index, p := range palette {
+						sum := sqDiff(er, p[0]) + sqDiff(eg, p[1]) + sqDiff(eb, p[2]) + sqDiff(ea, p[3])
+						if sum < bestSum {
+							bestIndex, bestSum = index, sum
+							if sum == 0 {
+								break
+							}
 						}
 					}
 				}
@@ -1081,4 +1099,96 @@ func drawPaletted(dst Image, r image.Rectangle, src image.Image, sp image.Point,
 			clear(quantErrorNext)
 		}
 	}
+}
+
+// paletteGrid finds the closest palette color with the same result as
+// checking every palette color in order, ties included, but checks only
+// those listed for the color's cell. Cells split R,G,B,A by the top four
+// bits of each channel. Each sqDiff term never decreases as its own
+// channel's difference grows, so a palette color whose nearest distance to
+// a cell is more than another's farthest is never the closest there, and
+// is not listed.
+type paletteGrid struct {
+	// cells[a>>12][r>>12<<8|g>>12<<4|b>>12] is the cell of (r, g, b, a).
+	// Its list is cands[start:end], not yet filled in if end is zero.
+	cells [16][]paletteGridCell
+
+	// cands starts with the whole palette, which is the list of any cell
+	// filled in after len(cands) reaches maxGridCands, capping memory.
+	cands []uint8
+}
+
+type paletteGridCell struct {
+	start, end int32
+}
+
+const maxGridCands = 1 << 18 // 256 KiB.
+
+// newPaletteGrid returns a paletteGrid for palette, of 1 to 256 colors, or
+// nil if a channel is outside [0, 0xffff], where sqDiff wraps around.
+func newPaletteGrid(palette [][4]int32) *paletteGrid {
+	for _, p := range palette {
+		if (p[0]|p[1]|p[2]|p[3])&^0xffff != 0 {
+			return nil
+		}
+	}
+	pg := &paletteGrid{cands: make([]uint8, len(palette))}
+	for i := range pg.cands {
+		pg.cands[i] = uint8(i)
+	}
+	return pg
+}
+
+// index returns the index of the palette color closest to e, whose
+// channels must be in [0, 0xffff].
+func (pg *paletteGrid) index(palette [][4]int32, e *[4]int32) int {
+	r, g, b, a := e[0], e[1], e[2], e[3]
+	slab := pg.cells[a>>12]
+	if slab == nil {
+		slab = make([]paletteGridCell, 1<<12)
+		pg.cells[a>>12] = slab
+	}
+	c := &slab[r>>12<<8|g>>12<<4|b>>12]
+	if c.end == 0 {
+		if len(pg.cands) < maxGridCands {
+			pg.fill(palette, c, r, g, b, a)
+		} else {
+			c.start, c.end = 0, int32(len(palette))
+		}
+	}
+	// The list is in palette order, so < keeps the lowest index on ties.
+	bestIndex, bestSum := 0, uint32(1<<32-1)
+	for _, i := range pg.cands[c.start:c.end] {
+		p := &palette[i]
+		sum := sqDiff(r, p[0]) + sqDiff(g, p[1]) + sqDiff(b, p[2]) + sqDiff(a, p[3])
+		if sum < bestSum {
+			bestIndex, bestSum = int(i), sum
+		}
+	}
+	return bestIndex
+}
+
+// fill fills in c, the cell of (r, g, b, a), which spans 0x1000 values of
+// each channel.
+func (pg *paletteGrid) fill(palette [][4]int32, c *paletteGridCell, r, g, b, a int32) {
+	lo := [4]int32{r &^ 0xfff, g &^ 0xfff, b &^ 0xfff, a &^ 0xfff}
+	bound := uint32(1<<32 - 1)
+	for _, p := range palette {
+		var farthest uint32
+		for k := range 4 {
+			farthest += max(sqDiff(lo[k], p[k]), sqDiff(lo[k]|0xfff, p[k]))
+		}
+		bound = min(bound, farthest)
+	}
+	c.start = int32(len(pg.cands))
+	for i, p := range palette {
+		var nearest uint32
+		for k := range 4 {
+			nearest += sqDiff(min(max(p[k], lo[k]), lo[k]|0xfff), p[k])
+		}
+		if nearest <= bound {
+			pg.cands = append(pg.cands, uint8(i))
+		}
+	}
+	c.end = int32(len(pg.cands))
 }

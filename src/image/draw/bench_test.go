@@ -7,7 +7,7 @@ package draw
 import (
 	"image"
 	"image/color"
-	"reflect"
+	colorpalette "image/color/palette"
 	"testing"
 )
 
@@ -56,10 +56,8 @@ func bench(b *testing.B, dcm, scm, mcm color.Model, op Op) {
 		}
 		dst = dst1
 	default:
-		// The == operator isn't defined on a color.Palette (a slice), so we
-		// use reflection.
-		if reflect.DeepEqual(dcm, palette) {
-			dst1 := image.NewPaletted(image.Rect(0, 0, dstw, dsth), palette)
+		if p, ok := dcm.(color.Palette); ok {
+			dst1 := image.NewPaletted(image.Rect(0, 0, dstw, dsth), p)
 			for y := 0; y < dsth; y++ {
 				for x := 0; x < dstw; x++ {
 					dst1.SetColorIndex(x, y, uint8(x^y)&1)
@@ -254,6 +252,10 @@ func BenchmarkPalettedFill(b *testing.B) {
 
 func BenchmarkPalettedRGBA(b *testing.B) {
 	bench(b, palette, color.RGBAModel, nil, Src)
+}
+
+func BenchmarkPalettedWebSafeRGBA(b *testing.B) {
+	bench(b, color.Palette(colorpalette.WebSafe), color.RGBAModel, nil, Src)
 }
 
 // The BenchmarkGenericFoo functions exercise the generic, slow-path code.

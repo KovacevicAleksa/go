@@ -7,7 +7,9 @@ package draw
 import (
 	"image"
 	"image/color"
+	colorpalette "image/color/palette"
 	"image/png"
+	"math/rand/v2"
 	"os"
 	"testing"
 	"testing/quick"
@@ -736,31 +738,130 @@ func TestPaletted(t *testing.T) {
 		color.RGBA{0xff, 0x55, 0xff, 0xff},
 		color.RGBA{0xff, 0xff, 0xff, 0xff},
 	}
+	// tieColor is equally close to tiePalette[0] and tiePalette[1], at the
+	// corner of a paletteGrid cell, so the lower index, 0, must win.
+	tieColor := color.RGBA64{0xfff, 0xfff, 0xfff, 0xfff}
+	tiePalette := append(color.Palette{
+		color.RGBA64{0x1ffe, 0x1ffe, 0x1ffe, 0x1ffe},
+		color.RGBA64{0, 0, 0, 0},
+	}, colorpalette.WebSafe...)
+	rng := rand.New(rand.NewPCG(1, 2))
+	randomColor := func() color.Color {
+		c := rng.Uint32()
+		return color.NRGBA{uint8(c), uint8(c >> 8), uint8(c >> 16), uint8(c >> 24)}
+	}
+	randomPalette := make(color.Palette, 256)
+	for i := range randomPalette {
+		randomPalette[i] = randomColor()
+	}
+	palettes := map[string]color.Palette{
+		"cga":    cgaPalette,
+		"plan9":  colorpalette.Plan9,
+		"random": randomPalette,
+		"tie":    tiePalette,
+		"repeat": append(colorpalette.WebSafe[:216:216], colorpalette.WebSafe[:40]...),
+		"bad":    append(colorpalette.WebSafe[:216:216], badColor{0xfffe0000, 0x8000, 0x8000, 0xffff}),
+	}
 	drawers := map[string]Drawer{
 		"src":             Src,
 		"floyd-steinberg": FloydSteinberg,
 	}
+	tie, noise := image.NewRGBA64(b), image.NewNRGBA(b)
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			tie.SetRGBA64(x, y, tieColor)
+			noise.Set(x, y, randomColor())
+		}
+	}
 	sources := map[string]image.Image{
 		"uniform":  &image.Uniform{color.RGBA{0xff, 0x7f, 0xff, 0xff}},
 		"video001": video001,
+		"noise":    noise,
+		"tie":      tie,
 	}
 
-	for dName, d := range drawers {
-	loop:
-		for sName, src := range sources {
-			dst0 := image.NewPaletted(b, cgaPalette)
-			dst1 := image.NewPaletted(b, cgaPalette)
-			d.Draw(dst0, b, src, image.Point{})
-			d.Draw(embeddedPaletted{dst1}, b, src, image.Point{})
-			for y := b.Min.Y; y < b.Max.Y; y++ {
-				for x := b.Min.X; x < b.Max.X; x++ {
-					if !eq(dst0.At(x, y), dst1.At(x, y)) {
-						t.Errorf("%s / %s: at (%d, %d), %v versus %v",
-							dName, sName, x, y, dst0.At(x, y), dst1.At(x, y))
-						continue loop
+	for pName, p := range palettes {
+		for dName, d := range drawers {
+		loop:
+			for sName, src := range sources {
+				dst0 := image.NewPaletted(b, p)
+				dst1 := image.NewPaletted(b, p)
+				d.Draw(dst0, b, src, image.Point{})
+				d.Draw(embeddedPaletted{dst1}, b, src, image.Point{})
+				for y := b.Min.Y; y < b.Max.Y; y++ {
+					for x := b.Min.X; x < b.Max.X; x++ {
+						// A palette may repeat a color, so compare indexes.
+						if i0, i1 := dst0.ColorIndexAt(x, y), dst1.ColorIndexAt(x, y); i0 != i1 {
+							t.Errorf("%s / %s / %s: at (%d, %d), index %d versus %d",
+								pName, dName, sName, x, y, i0, i1)
+							continue loop
+						}
 					}
 				}
 			}
+		}
+	}
+}
+
+// badColor's RGBA method can return values outside [0, 0xffff].
+type badColor struct{ r, g, b, a uint32 }
+
+func (c badColor) RGBA() (r, g, b, a uint32) { return c.r, c.g, c.b, c.a }
+
+// TestPalettedBadColor tests that drawing a badColor onto an image large
+// enough for a paletteGrid does not panic and matches a small image.
+func TestPalettedBadColor(t *testing.T) {
+	// The struct hides the *image.Uniform from Draw's fast path for it.
+	bad := badColor{0x10000, 0x1ffff, 0xffffffff, 0xffff}
+	src := struct{ *image.Uniform }{image.NewUniform(bad)}
+	big := image.NewPaletted(image.Rect(0, 0, 128, 128), colorpalette.WebSafe)
+	small := image.NewPaletted(image.Rect(0, 0, 1, 1), colorpalette.WebSafe)
+	Draw(big, big.Bounds(), src, image.Point{}, Src)
+	Draw(small, small.Bounds(), src, image.Point{}, Src)
+	if got, want := big.Pix[0], small.Pix[0]; got != want {
+		t.Errorf("got index %d, want %d", got, want)
+	}
+}
+
+// TestPaletteGrid tests paletteGrid.index against checking every palette
+// color, at random colors and the corners of cells, including a palette
+// crowded into one cell, whose long lists fill the grid to maxGridCands.
+func TestPaletteGrid(t *testing.T) {
+	rng := rand.New(rand.NewPCG(3, 4))
+	crowded := make([][4]int32, 256)
+	for i := range crowded {
+		crowded[i] = [4]int32{0x8000 + int32(i%4), 0x8000 + int32(i/4%8), 0x8000 + int32(i/32), 0xffff}
+	}
+	random := make([][4]int32, 100)
+	for i := range random {
+		c := rng.Uint64()
+		a := int32(c >> 48)
+		random[i] = [4]int32{int32(c) & 0xffff % (a + 1), int32(c>>16) & 0xffff % (a + 1), int32(c>>32) & 0xffff % (a + 1), a}
+	}
+	for name, palette := range map[string][][4]int32{"crowded": crowded, "random": random} {
+		pg := newPaletteGrid(palette)
+		for i := range 1 << 15 {
+			c := rng.Uint64()
+			e := [4]int32{int32(c) & 0xffff, int32(c>>16) & 0xffff, int32(c>>32) & 0xffff, int32(c >> 48)}
+			if i%2 == 0 {
+				// Move each channel to one end of its cell.
+				for k := range e {
+					e[k] |= int32(c>>(k+60)&1) * 0xfff
+					e[k] &^= int32(c>>(k+60)&1^1) * 0xfff
+				}
+			}
+			want, bestSum := 0, uint32(1<<32-1)
+			for j, p := range palette {
+				if sum := sqDiff(e[0], p[0]) + sqDiff(e[1], p[1]) + sqDiff(e[2], p[2]) + sqDiff(e[3], p[3]); sum < bestSum {
+					want, bestSum = j, sum
+				}
+			}
+			if got := pg.index(palette, &e); got != want {
+				t.Fatalf("%s: color %v: got index %d, want %d", name, e, got, want)
+			}
+		}
+		if name == "crowded" && len(pg.cands) < maxGridCands {
+			t.Errorf("crowded: len(cands) = %d, want at least %d", len(pg.cands), maxGridCands)
 		}
 	}
 }
