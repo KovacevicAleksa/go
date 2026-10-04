@@ -2028,8 +2028,7 @@ func mexit(osStack bool) {
 	if mp.gsignal != nil {
 		stackfree(mp.gsignal.stack)
 		if valgrindenabled {
-			valgrindDeregisterStack(mp.gsignal.valgrindStackID)
-			mp.gsignal.valgrindStackID = 0
+			valgrindDeregisterStack(mp.gsignal)
 		}
 		// On some platforms, when calling into VDSO (e.g. nanotime)
 		// we store our g on the gsignal stack, if there is one.
@@ -2337,8 +2336,7 @@ func allocm(pp *p, fn func(), id int64) *m {
 				systemstack(func() {
 					stackfree(freem.g0.stack)
 					if valgrindenabled {
-						valgrindDeregisterStack(freem.g0.valgrindStackID)
-						freem.g0.valgrindStackID = 0
+						valgrindDeregisterStack(freem.g0)
 					}
 				})
 			}
@@ -5323,7 +5321,7 @@ func malg(stacksize int32) *g {
 		systemstack(func() {
 			newg.stack = stackalloc(uint32(stacksize))
 			if valgrindenabled {
-				newg.valgrindStackID = valgrindRegisterStack(unsafe.Pointer(newg.stack.lo), unsafe.Pointer(newg.stack.hi))
+				valgrindRegisterStack(newg)
 			}
 		})
 		newg.stackguard0 = newg.stack.lo + stackGuard
@@ -5534,8 +5532,7 @@ func gfput(pp *p, gp *g) {
 		gp.stack.hi = 0
 		gp.stackguard0 = 0
 		if valgrindenabled {
-			valgrindDeregisterStack(gp.valgrindStackID)
-			gp.valgrindStackID = 0
+			valgrindDeregisterStack(gp)
 		}
 	}
 
@@ -5595,8 +5592,7 @@ retry:
 			gp.stack.hi = 0
 			gp.stackguard0 = 0
 			if valgrindenabled {
-				valgrindDeregisterStack(gp.valgrindStackID)
-				gp.valgrindStackID = 0
+				valgrindDeregisterStack(gp)
 			}
 		})
 	}
@@ -5605,7 +5601,7 @@ retry:
 		systemstack(func() {
 			gp.stack = stackalloc(startingStackSize)
 			if valgrindenabled {
-				gp.valgrindStackID = valgrindRegisterStack(unsafe.Pointer(gp.stack.lo), unsafe.Pointer(gp.stack.hi))
+				valgrindRegisterStack(gp)
 			}
 		})
 		gp.stackguard0 = gp.stack.lo + stackGuard
