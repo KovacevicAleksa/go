@@ -2,20 +2,50 @@
 
 # Issue 35837: "go vet -<analyzer> <std package>" should use the requested
 # analyzers, not the default analyzers for 'go test'.
-go vet -n -buildtags=false runtime
+go vet -a -n -buildtags=false runtime
 stderr '-buildtags=false'
 ! stderr '-unsafeptr=false'
 
 # Issue 37030: "go vet <std package>" without other flags should disable the
 # unsafeptr check by default.
-go vet -n runtime
+go vet -a -n runtime
 stderr '-unsafeptr=false'
 ! stderr '-unreachable=false'
 
 # However, it should be enabled if requested explicitly.
-go vet -n -unsafeptr runtime
+go vet -a -n -unsafeptr runtime
 stderr '-unsafeptr'
 ! stderr '-unsafeptr=false'
+
+# Flags of the go command that the vet tool also accepts, such as -tags,
+# -v and -json, do not select analyzers, so they should not turn the
+# unsafeptr check back on.
+go vet -a -n -tags=x runtime
+stderr '-unsafeptr=false -tags=x'
+go vet -a -n -v runtime
+stderr '-unsafeptr=false -v'
+go vet -a -n -json runtime
+stderr '-unsafeptr=false -json'
+env GOFLAGS=-tags=x
+go vet -a -n runtime
+stderr '-unsafeptr=false'
+env GOFLAGS=
+
+# The flags that go vet adds for the tool, such as -json and -fix, should
+# be kept along with the default analyzer flags.
+go vet -a -n runtime
+stderr '-unsafeptr=false -json'
+go vet -a -n -fix runtime
+stderr '-unsafeptr=false -fix'
+go vet -a -n -fix -diff runtime
+stderr '-unsafeptr=false .*-diff'
+
+# Analyzer flags from GOFLAGS should still turn off the defaults.
+env GOFLAGS=-unsafeptr
+go vet -a -n runtime
+stderr '-unsafeptr'
+! stderr '-unsafeptr=false'
+env GOFLAGS=
 
 # -unreachable is disabled during test but on during plain vet.
 # The -a makes sure the vet result is not cached, or else we won't print the command line.
