@@ -2170,6 +2170,17 @@ func MallocGC(size uintptr, typ *abi.Type, needzero bool) unsafe.Pointer {
 	return mallocgc(size, typ, needzero)
 }
 
+// SizeClassSize returns the size of the size class that an object of the
+// given size is allocated from, for a type that contains pointers. A large
+// object has no size class, and the result is its size rounded up to a page.
+func SizeClassSize(size uintptr) uintptr {
+	if size <= maxSmallSize-gc.MallocHeaderSize && !heapBitsInSpan(size) {
+		// roundupsize leaves out the malloc header.
+		return roundupsize(size, false) + gc.MallocHeaderSize
+	}
+	return roundupsize(size, false)
+}
+
 func FuncNamePiecesForPrint(name string) (string, string, string, string, string) {
 	return funcNamePiecesForPrint(name)
 }
