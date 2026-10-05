@@ -126,7 +126,7 @@ var (
 func run(ctx context.Context, cmd *base.Command, args []string) {
 	moduleLoader := modload.NewLoader()
 	// Compute flags for the vet/fix tool (e.g. cmd/{vet,fix}).
-	toolFlags, pkgArgs := toolFlags(cmd, args)
+	analyzerFlags, sharedFlags, pkgArgs := toolFlags(cmd, args)
 
 	// The vet/fix commands do custom flag processing;
 	// initialize workspaces after that.
@@ -158,7 +158,7 @@ func run(ctx context.Context, cmd *base.Command, args []string) {
 	// and to configure it), whereas others [-V -c -diff -fix -flags -json]
 	// are core to unitchecker itself.
 	//
-	// Most are passed through to toolFlags, but not all:
+	// Most are passed through to the tool, but not all:
 	// * -V and -flags are used by the handshake in the [toolFlags] function;
 	// * these old flags have no effect: [-all -source -tags -v]; and
 	// * the [-c -fix -diff -json] flags are handled specially
@@ -177,8 +177,11 @@ func run(ctx context.Context, cmd *base.Command, args []string) {
 	//   and describes both diagnostics and fixes (but does not apply them).
 	// * -c=n is supported by the unitchecker, but we reimplement it
 	//   here (see printDiagnostics), and do not pass the flag through.
+	// * Flags that the go command also has, such as -tags and -json, are
+	//   kept in sharedFlags, apart from analyzerFlags, so that they do not
+	//   count as an explicit choice of analyzers.
 
-	work.VetExplicit = len(toolFlags) > 0
+	work.VetExplicit = len(analyzerFlags) > 0
 
 	applyFixes := false
 	if cmd.Name() == "fix" || *vetFixFlag {
@@ -188,9 +191,9 @@ func run(ctx context.Context, cmd *base.Command, args []string) {
 				base.Fatalf("-json and -diff cannot be used together")
 			}
 		} else {
-			toolFlags = append(toolFlags, "-fix")
+			sharedFlags = append(sharedFlags, "-fix")
 			if diffFlag {
-				toolFlags = append(toolFlags, "-diff")
+				sharedFlags = append(sharedFlags, "-diff")
 				// In -diff mode, the tool prints unified diffs to stdout.
 				// Copy stdout through and exit non-zero if diffs were printed,
 				// consistent with gofmt -d and go mod tidy -diff.
@@ -210,7 +213,7 @@ func run(ctx context.Context, cmd *base.Command, args []string) {
 			// (JSON reliably frames diagnostics, fixes, and errors so
 			// that we don't have to parse stderr or interpret non-zero
 			// exit codes, and interacts better with the action cache.)
-			toolFlags = append(toolFlags, "-json")
+			sharedFlags = append(sharedFlags, "-json")
 			work.VetHandleStdout = printJSONDiagnostics
 		}
 		if diffFlag {
@@ -228,7 +231,8 @@ func run(ctx context.Context, cmd *base.Command, args []string) {
 		}
 	}
 
-	work.VetFlags = toolFlags
+	work.VetFlags = analyzerFlags
+	work.VetSharedFlags = sharedFlags
 
 	pkgOpts := load.PackageOpts{ModResolveTests: true}
 	pkgs := load.PackagesAndErrors(moduleLoader, ctx, pkgOpts, pkgArgs)

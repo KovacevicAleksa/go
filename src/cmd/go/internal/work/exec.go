@@ -1659,17 +1659,25 @@ func buildVetConfig(a *Action, srcfiles []string, vetDeps []*Action) {
 // The caller is expected to set it (if needed) before executing any vet actions.
 var VetTool string
 
-// VetFlags are the default flags to pass to vet.
+// VetFlags are the flags that select or configure the analyzers of vet.
 // The caller is expected to set them before executing any vet actions.
+// For packages in GOROOT, with the default vet tool, they are replaced by
+// the defaults for the standard library unless VetExplicit is set;
+// see [Builder.vet].
 var VetFlags []string
+
+// VetSharedFlags are flags of the go command that it passes on to vet,
+// such as -tags, -json and -fix. Unlike VetFlags, they are passed to vet
+// for every package.
+var VetSharedFlags []string
 
 // VetHandleStdout determines how the stdout output of each vet tool
 // invocation should be handled. The default behavior is to copy it to
 // the go command's stdout, atomically.
 var VetHandleStdout = copyToStdout
 
-// VetExplicit records whether the vet flags (which may include
-// -{vet,fix}tool) were set explicitly on the command line.
+// VetExplicit records whether VetFlags were set explicitly,
+// on the command line or in GOFLAGS.
 var VetExplicit bool
 
 func (b *Builder) vet(ctx context.Context, a *Action) error {
@@ -1751,6 +1759,7 @@ func (b *Builder) vet(ctx context.Context, a *Action) error {
 			vetFlags = append(vetFlags, "-unreachable=false")
 		}
 	}
+	vetFlags = slices.Concat(vetFlags, VetSharedFlags)
 
 	// Note: We could decide that vet should compute export data for
 	// all analyses, in which case we don't need to include the flags here.
