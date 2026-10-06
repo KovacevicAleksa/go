@@ -1,0 +1,18 @@
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+index a8d7173672..a71ad9f640 100644
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -5400,7 +5400,12 @@ func newproc1(fn *funcval, callergp *g, callerpc uintptr, parked bool, waitreaso
+ 	newg.gopc = callerpc
+ 	newg.ancestors = saveAncestors(callergp)
+ 	newg.startpc = fn.fn
+-	newg.runningCleanups.Store(false)
++	if newg.runningCleanups.Load() {
++		// Only set if a cleanup goroutine exited while running
++		// cleanups, for example through Goexit. Check first to
++		// avoid an atomic store per goroutine creation.
++		newg.runningCleanups.Store(false)
++	}
+ 	if isSystemGoroutine(newg, false) {
+ 		sched.ngsys.Add(1)
+ 	} else {

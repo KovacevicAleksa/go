@@ -1,0 +1,49 @@
+name: "TEST/WIP bench-b (benchmark only, not for review)"
+
+# Benchmark only, see bench-b/README.md. Not a change proposal.
+on:
+  workflow_dispatch:
+  push:
+    branches: [test/bench-b-wip]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bench-b
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: go install golang.org/x/perf/cmd/benchstat@latest
+      - env:
+          CPUS: "1,2,4"
+        run: bench-b/bench.sh "$RUNNER_TEMP/b" 20
+      - name: Summary
+        if: always()
+        run: |
+          R=$RUNNER_TEMP/b/results
+          {
+            echo "## TEST/WIP, benchmark only: ${{ matrix.runner }}"
+            echo '```'
+            grep -E 'Model name|^CPU\(s\)' "$R/machine.txt" || true
+            cat "$R/go-version.txt" 2>/dev/null || true
+            for b in runtime http spawn; do cat "$R/$b-benchstat.txt" 2>/dev/null || true; done
+            tail -3 "$R/test-runtime.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-b-${{ matrix.runner }}
+          path: ${{ runner.temp }}/b/results
