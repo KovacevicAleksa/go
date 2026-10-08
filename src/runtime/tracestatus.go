@@ -145,12 +145,12 @@ func goStatusToTraceGoStatus(status uint32, wr waitReason) tracev2.GoStatus {
 // both Gs and Ps).
 type traceSchedResourceState struct {
 	// statusTraced indicates whether a status event was traced for this resource
-	// a particular generation.
+	// a particular generation. Bit gen%3 is set if it was for generation gen.
 	//
-	// There are 3 of these because when transitioning across generations, traceAdvance
+	// There are 3 bits because when transitioning across generations, traceAdvance
 	// needs to be able to reliably observe whether a status was traced for the previous
 	// generation, while we need to clear the value for the next generation.
-	statusTraced [3]atomic.Uint32
+	statusTraced atomic.Uint32
 
 	// seq is the sequence counter for this scheduling resource's events.
 	// The purpose of the sequence counter is to establish a partial order between
@@ -169,8 +169,15 @@ type traceSchedResourceState struct {
 //
 //go:nosplit
 func (r *traceSchedResourceState) acquireStatus(gen uintptr) bool {
-	if !r.statusTraced[gen%3].CompareAndSwap(0, 1) {
-		return false
+	bit := uint32(1) << (gen % 3)
+	for {
+		old := r.statusTraced.Load()
+		if old&bit != 0 {
+			return false
+		}
+		if r.statusTraced.CompareAndSwap(old, old|bit) {
+			break
+		}
 	}
 	r.readyNextGen(gen)
 	return true
@@ -180,18 +187,18 @@ func (r *traceSchedResourceState) acquireStatus(gen uintptr) bool {
 func (r *traceSchedResourceState) readyNextGen(gen uintptr) {
 	nextGen := traceNextGen(gen)
 	r.seq[nextGen%2] = 0
-	r.statusTraced[nextGen%3].Store(0)
+	r.statusTraced.And(^(uint32(1) << (nextGen % 3)))
 }
 
 // statusWasTraced returns true if the sched resource's status was already acquired for tracing.
 func (r *traceSchedResourceState) statusWasTraced(gen uintptr) bool {
-	return r.statusTraced[gen%3].Load() != 0
+	return r.statusTraced.Load()&(1<<(gen%3)) != 0
 }
 
 // setStatusTraced indicates that the resource's status was already traced, for example
 // when a goroutine is created.
 func (r *traceSchedResourceState) setStatusTraced(gen uintptr) {
-	r.statusTraced[gen%3].Store(1)
+	r.statusTraced.Or(1 << (gen % 3))
 }
 
 // nextSeq returns the next sequence number for the resource.

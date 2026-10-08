@@ -548,7 +548,6 @@ type g struct {
 	runningCleanups atomic.Bool
 	sig             uint32
 	secret          int32 // current nesting of runtime/secret.Do calls.
-	writebuf        []byte
 	sigcode0        uintptr
 	sigcode1        uintptr
 	sigpc           uintptr
@@ -653,6 +652,8 @@ type m struct {
 	blocked         bool // m is blocked on a note
 	newSigstack     bool // minit on C thread called sigaltstack
 	printlock       int8
+	writebuf        []byte        // if writebufg is set, its print output goes here; see gwrite
+	writebufg       guintptr      // must not be rescheduled while set
 	incgo           bool          // m is executing a cgo call
 	isextra         bool          // m is an extra m
 	isExtraInC      bool          // m is an extra m that does not have any Go frames
