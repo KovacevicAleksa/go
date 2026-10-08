@@ -7,6 +7,10 @@
 #   new3a  new2 with g.trace and g.gcAssistBytes moved off the end of g
 #   new3b  new3a with rarely used fields moved to the end of g
 #   ctl2   new2 padded back to 448 bytes (same code, old size class)
+#   basem  base with 32 bytes of padding in m after printlock, which shifts
+#          the rest of m the way writebuf and writebufg after printlock do
+#   new3bm new3b with writebuf and writebufg at the end of m
+# VARIANTS selects which to run.
 # Builds Go at BASE from source, builds every benchmark binary once per
 # variant, runs the variants in turn, compares them with benchstat, then
 # runs the tests of TESTED (default new3b).

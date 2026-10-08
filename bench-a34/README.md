@@ -12,8 +12,10 @@ linux/arm64, all against Go master at 3b98eddbcd:
 - `new3a.diff`: new2 with g.trace and g.gcAssistBytes moved off the end of g.
 - `new3b.diff`: new3a with rarely used fields moved to the end of g.
 - `ctl2.diff`: new2 with g padded back to 448 bytes, to separate the effect of the size class from the code.
+- `basem.diff`: base with 32 bytes of padding in m after printlock, to see whether shifting m alone costs time.
+- `new3bm.diff`: new3b with writebuf and writebufg at the end of m.
 - `ctl.diff`: new padded back to 448 bytes; kept from the first run, no longer run.
 
 `bench.sh` builds Go from source, builds the benchmark binaries for each
 variant, runs them in turn, compares them with benchstat, and runs the tests
-of new3b.
+of one variant (see the workflow).
