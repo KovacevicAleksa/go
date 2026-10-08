@@ -3,13 +3,17 @@
 This branch exists only to run a benchmark on GitHub's 4-vCPU runners.
 It is not meant for review, not sent to Gerrit, and will be deleted afterwards.
 
-It compares three experimental versions of the runtime on linux/amd64 and
+It compares experimental versions of the runtime on linux/amd64 and
 linux/arm64, all against Go master at 3b98eddbcd:
 
 - `base.diff`: g at 448 bytes (remove g.stackLock, valgrindStackID only in valgrind builds).
 - `new.diff`: base plus packing the trace status flags and moving writebuf from g to m, g at 416 bytes.
-- `ctl.diff`: new with g padded back to 448 bytes, to separate the effect of the size class from the code.
+- `new2.diff`: new with atomic.Or32 instead of a CAS loop when acquiring a trace status.
+- `new3a.diff`: new2 with g.trace and g.gcAssistBytes moved off the end of g.
+- `new3b.diff`: new3a with rarely used fields moved to the end of g.
+- `ctl2.diff`: new2 with g padded back to 448 bytes, to separate the effect of the size class from the code.
+- `ctl.diff`: new padded back to 448 bytes; kept from the first run, no longer run.
 
 `bench.sh` builds Go from source, builds the benchmark binaries for each
 variant, runs them in turn, compares them with benchstat, and runs the tests
-of the new variant.
+of new3b.
