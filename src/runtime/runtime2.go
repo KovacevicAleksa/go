@@ -503,6 +503,7 @@ type g struct {
 	//    param may point to a savedOpenDeferState.
 	param        unsafe.Pointer
 	atomicstatus atomic.Uint32
+	trace        gTraceState // per-G tracer state
 	goid         uint64
 	schedlink    guintptr
 	waitsince    int64      // approx time when the g become blocked
@@ -548,7 +549,6 @@ type g struct {
 	runningCleanups atomic.Bool
 	sig             uint32
 	secret          int32 // current nesting of runtime/secret.Do calls.
-	writebuf        []byte
 	sigcode0        uintptr
 	sigcode1        uintptr
 	sigpc           uintptr
@@ -558,7 +558,7 @@ type g struct {
 	startpc         uintptr         // pc of goroutine function
 	racectx         uintptr
 	waiting         *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
-	cgoCtxt         []uintptr      // cgo traceback context
+	cgoCtxt         *[]uintptr     // cgo traceback contexts, allocated on first use; see cgocallbackg1
 	labels          unsafe.Pointer // profiler labels
 	timer           *timer         // cached timer for time.Sleep
 	sleepWhen       int64          // when to sleep until
@@ -578,9 +578,6 @@ type g struct {
 	// valgrind is the Valgrind state of this G's stack. It is empty
 	// unless the runtime is built with Valgrind support (see valgrind.go).
 	valgrind valgrindPerG
-
-	// Per-G tracer state.
-	trace gTraceState
 
 	// Per-G GC state
 
@@ -726,6 +723,9 @@ type m struct {
 
 	// self points this M until mexit clears it to return nil.
 	self mWeakPointer
+
+	writebuf  []byte   // if writebufg is set, its print output goes here; see gwrite
+	writebufg guintptr // must not be rescheduled while set
 }
 
 const mRedZoneSize = (16 << 3) * asanenabledBit // redZoneSize(2048)
