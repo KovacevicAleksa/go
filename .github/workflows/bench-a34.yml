@@ -30,8 +30,8 @@ jobs:
       - run: go install golang.org/x/perf/cmd/benchstat@latest
       - run: bench-a34/bench.sh "$RUNNER_TEMP/w" 15
         env:
-          VARIANTS: base basem new3b new3bm
-          TESTED: new3bm
+          VARIANTS: master base new3bm new4 new4min ctl4
+          TESTED: new4min
       - name: Summary
         if: always()
         run: |

@@ -10,7 +10,14 @@
 #   basem  base with 32 bytes of padding in m after printlock, which shifts
 #          the rest of m the way writebuf and writebufg after printlock do
 #   new3bm new3b with writebuf and writebufg at the end of m
-# VARIANTS selects which to run.
+#   master Go at BASE, no change
+#   new4   new3bm with 32-bit trace sequence counters next to atomicstatus
+#          and g.cgoCtxt allocated on first use, g at 384
+#   new4min new4 with the field order of master except for the moves
+#          needed to reach 384, plus the parser compare modulo 2^32
+#   ctl4   new4min padded back to 416 bytes (same code, 416 size class)
+# VARIANTS selects which to run. The order is rotated every round, so no
+# variant always runs first or last.
 # Builds Go at BASE from source, builds every benchmark binary once per
 # variant, runs the variants in turn, compares them with benchstat, then
 # runs the tests of TESTED (default new3b).
@@ -54,7 +61,9 @@ reset_tree() {
 
 for v in $VARIANTS; do
 	reset_tree
-	git -C "$W/go" apply "$HERE/$v.diff"
+	if [ "$v" != master ]; then
+		git -C "$W/go" apply "$HERE/$v.diff"
+	fi
 	mkdir -p "$W/$v"
 	"$GO" test -c -o "$W/$v/runtime.test" runtime
 	"$GO" test -c -o "$W/$v/http.test" net/http
@@ -78,9 +87,15 @@ run() {
 	"$d/spawn" -cpu="$CPUS" -trace >> "$R/spawn-$v.txt"
 	"$d/memg" >> "$R/memg-$v.txt"
 }
-for i in $(seq "$ROUNDS"); do
-	echo "round $i/$ROUNDS"
-	for v in $VARIANTS; do
+read -r -a vs <<< "$VARIANTS"
+n=${#vs[@]}
+for ((i = 0; i < ROUNDS; i++)); do
+	order=()
+	for ((j = 0; j < n; j++)); do
+		order+=("${vs[(i + j) % n]}")
+	done
+	echo "round $((i + 1))/$ROUNDS: ${order[*]}"
+	for v in "${order[@]}"; do
 		run "$v"
 	done
 done
@@ -92,7 +107,8 @@ for b in runtime http spawn memg; do
 		args+=("$v=$R/$b-$v.txt")
 	done
 	"$BENCHSTAT" "${args[@]}" > "$R/$b-benchstat.txt"
-	"$BENCHSTAT" ctl2="$R/$b-ctl2.txt" new2="$R/$b-new2.txt" new3a="$R/$b-new3a.txt" new3b="$R/$b-new3b.txt" > "$R/$b-benchstat-vs-ctl2.txt" || true
+	"$BENCHSTAT" -format csv "${args[@]}" > "$R/$b-benchstat.csv"
+	"$BENCHSTAT" ctl4="$R/$b-ctl4.txt" new4min="$R/$b-new4min.txt" new4="$R/$b-new4.txt" > "$R/$b-benchstat-vs-ctl4.txt" || true
 done
 
 # Correctness of the tested variant on this platform.
@@ -116,6 +132,7 @@ check trace "$GO" test -count=1 internal/trace runtime/trace
 check pprof-short "$GO" test -short -count=1 runtime/pprof
 check asan-build "$GO" build -asan runtime
 check race-short "$GO" test -race -short -count=1 -run 'Stack|Print|Hexdump|DebugLog|Trace' runtime
+check cgo "$GO" test -count=1 -run 'Cgo' runtime
 if [ "$(uname -m)" = x86_64 ]; then
 	check sizeof-386 env GOARCH=386 "$GO" test -count=1 -run '^TestSizeof$' runtime
 fi
