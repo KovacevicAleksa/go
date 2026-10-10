@@ -1,0 +1,52 @@
+name: "TEST/WIP bench-a34 (benchmark only, not for review)"
+
+# Benchmark only, see bench-a34/README.md. Not a change proposal.
+on:
+  workflow_dispatch:
+  push:
+    branches: [test/a34-wip]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        # Two jobs per runner type: amd64 jobs land on different EPYC models.
+        copy: [1, 2]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bench-a34
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: go install golang.org/x/perf/cmd/benchstat@latest
+      - run: bench-a34/bench.sh "$RUNNER_TEMP/w" 15
+        env:
+          VARIANTS: master base new3bm new4 new4min ctl4
+          TESTED: new4min
+      - name: Summary
+        if: always()
+        run: |
+          R=$RUNNER_TEMP/w/results
+          {
+            echo "## TEST/WIP, benchmark only: ${{ matrix.runner }} #${{ matrix.copy }}"
+            echo '```'
+            grep -E 'Model name|^CPU\(s\)' "$R/machine.txt" || true
+            cat "$R/go-version.txt" 2>/dev/null || true
+            for b in runtime http spawn memg; do cat "$R/$b-benchstat.txt" 2>/dev/null || true; done
+            cat "$R/tests.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-a34-${{ matrix.runner }}-${{ matrix.copy }}
+          path: ${{ runner.temp }}/w/results

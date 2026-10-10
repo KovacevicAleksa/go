@@ -1,0 +1,523 @@
+diff --git a/src/runtime/export_debuglog_test.go b/src/runtime/export_debuglog_test.go
+index c370a79336..6ae8329bd3 100644
+--- a/src/runtime/export_debuglog_test.go
++++ b/src/runtime/export_debuglog_test.go
+@@ -29,12 +29,9 @@ func (l *dloggerImpl) S(x string) *dloggerImpl   { return l.s(x) }
+ func (l *dloggerImpl) PC(x uintptr) *dloggerImpl { return l.pc(x) }
+ 
+ func DumpDebugLog() string {
+-	gp := getg()
+-	gp.writebuf = make([]byte, 0, 1<<20)
+-	printDebugLogImpl()
+-	buf := gp.writebuf
+-	gp.writebuf = nil
+-
++	buf := capturePrint(make([]byte, 0, 1<<20), func() {
++		printDebugLogImpl()
++	})
+ 	return string(buf)
+ }
+ 
+diff --git a/src/runtime/export_test.go b/src/runtime/export_test.go
+index bf7607495b..3a3b1c33ab 100644
+--- a/src/runtime/export_test.go
++++ b/src/runtime/export_test.go
+@@ -596,6 +596,8 @@ type Sudog = sudog
+ 
+ type XRegPerG = xRegPerG
+ 
++type ValgrindPerG = valgrindPerG
++
+ func Getg() *G {
+ 	return getg()
+ }
+@@ -2089,48 +2091,56 @@ func (head *ListHeadManual) Remove(p unsafe.Pointer) {
+ 	head.l.remove(p)
+ }
+ 
++// capturePrint calls f with the print output of the calling goroutine
++// written to buf, and returns the output.
++func capturePrint(buf []byte, f func()) []byte {
++	// The goroutine must stay on this M while writebufg is set.
++	mp := acquirem()
++	mp.writebuf = buf
++	mp.writebufg.set(getg())
++	f()
++	buf = mp.writebuf
++	mp.writebuf = nil
++	mp.writebufg = 0
++	releasem(mp)
++	return buf
++}
++
+ func Hexdumper(base uintptr, wordBytes int, mark func(addr uintptr, start func()), data ...[]byte) string {
+-	buf := make([]byte, 0, 2048)
+-	getg().writebuf = buf
+-	h := hexdumper{addr: base, addrBytes: 4, wordBytes: uint8(wordBytes)}
+-	if mark != nil {
+-		h.mark = func(addr uintptr, m hexdumpMarker) {
+-			mark(addr, m.start)
++	buf := capturePrint(make([]byte, 0, 2048), func() {
++		h := hexdumper{addr: base, addrBytes: 4, wordBytes: uint8(wordBytes)}
++		if mark != nil {
++			h.mark = func(addr uintptr, m hexdumpMarker) {
++				mark(addr, m.start)
++			}
+ 		}
+-	}
+-	for _, d := range data {
+-		h.write(d)
+-	}
+-	h.close()
+-	n := len(getg().writebuf)
+-	getg().writebuf = nil
+-	if n == cap(buf) {
++		for _, d := range data {
++			h.write(d)
++		}
++		h.close()
++	})
++	if len(buf) == cap(buf) {
+ 		panic("Hexdumper buf too small")
+ 	}
+-	return string(buf[:n])
++	return string(buf)
+ }
+ 
+ func HexdumpWords(p, bytes uintptr) string {
+-	buf := make([]byte, 0, 2048)
+-	getg().writebuf = buf
+-	hexdumpWords(p, bytes, nil)
+-	n := len(getg().writebuf)
+-	getg().writebuf = nil
+-	if n == cap(buf) {
++	buf := capturePrint(make([]byte, 0, 2048), func() {
++		hexdumpWords(p, bytes, nil)
++	})
++	if len(buf) == cap(buf) {
+ 		panic("HexdumpWords buf too small")
+ 	}
+-	return string(buf[:n])
++	return string(buf)
+ }
+ 
+ // DumpPrintQuoted provides access to print(quoted()) for the tests in
+ // runtime/print_quoted_test.go, allowing us to test that implementation.
+ func DumpPrintQuoted(s string) string {
+-	gp := getg()
+-	gp.writebuf = make([]byte, 0, 1<<20)
+-	print(quoted(s))
+-	buf := gp.writebuf
+-	gp.writebuf = nil
+-
++	buf := capturePrint(make([]byte, 0, 1<<20), func() {
++		print(quoted(s))
++	})
+ 	return string(buf)
+ }
+ 
+@@ -2145,12 +2155,9 @@ func PrintBacklog() []byte {
+ 
+ // DumpPrint returns the output of print(v).
+ func DumpPrint[T any](v T) string {
+-	gp := getg()
+-	gp.writebuf = make([]byte, 0, 2048)
+-	print(v)
+-	buf := gp.writebuf
+-	gp.writebuf = nil
+-
++	buf := capturePrint(make([]byte, 0, 2048), func() {
++		print(v)
++	})
+ 	return string(buf)
+ }
+ 
+diff --git a/src/runtime/mgcmark.go b/src/runtime/mgcmark.go
+index edbdb3cc10..0922b4f2cb 100644
+--- a/src/runtime/mgcmark.go
++++ b/src/runtime/mgcmark.go
+@@ -374,8 +374,7 @@ func markrootFreeGStacks() {
+ 		gp.stack.lo = 0
+ 		gp.stack.hi = 0
+ 		if valgrindenabled {
+-			valgrindDeregisterStack(gp.valgrindStackID)
+-			gp.valgrindStackID = 0
++			valgrindDeregisterStack(gp)
+ 		}
+ 	}
+ 
+diff --git a/src/runtime/mprof.go b/src/runtime/mprof.go
+index f773787c43..49235d2026 100644
+--- a/src/runtime/mprof.go
++++ b/src/runtime/mprof.go
+@@ -1704,15 +1704,17 @@ func Stack(buf []byte, all bool) int {
+ 			// so that Stack's results are consistent.
+ 			// GOTRACEBACK is only about crash dumps.
+ 			g0.m.traceback = 1
+-			g0.writebuf = buf[0:0:len(buf)]
++			g0.m.writebuf = buf[0:0:len(buf)]
++			g0.m.writebufg.set(g0)
+ 			goroutineheader(gp)
+ 			traceback(pc, sp, 0, gp)
+ 			if all {
+ 				tracebackothers(gp)
+ 			}
+ 			g0.m.traceback = 0
+-			n = len(g0.writebuf)
+-			g0.writebuf = nil
++			n = len(g0.m.writebuf)
++			g0.m.writebuf = nil
++			g0.m.writebufg = 0
+ 		})
+ 	}
+ 
+diff --git a/src/runtime/panic.go b/src/runtime/panic.go
+index 46e3a64eb3..0b5203fd92 100644
+--- a/src/runtime/panic.go
++++ b/src/runtime/panic.go
+@@ -1612,7 +1612,7 @@ func startpanic_m() bool {
+ 
+ 	switch gp.m.dying {
+ 	case 0:
+-		// Setting dying >0 has the side-effect of disabling this G's writebuf.
++		// Setting dying >0 has the side-effect of disabling this M's writebuf.
+ 		gp.m.dying = 1
+ 		panicking.Add(1)
+ 		lock(&paniclk)
+diff --git a/src/runtime/print.go b/src/runtime/print.go
+index 8283359a6b..40d0653dcd 100644
+--- a/src/runtime/print.go
++++ b/src/runtime/print.go
+@@ -68,7 +68,7 @@ var debuglock mutex
+ 
+ func printlock() {
+ 	gp := getg()
+-	if gp.writebuf != nil && gp.m.dying == 0 {
++	if gp.m.writebufg.ptr() == gp && gp.m.dying == 0 {
+ 		// Output is being diverted into this goroutine's own buffer
+ 		// (see gwrite), so there is nothing shared to protect. Once
+ 		// the M is dying gwrite writes to stderr instead, so keep the lock.
+@@ -85,7 +85,7 @@ func printlock() {
+ 
+ func printunlock() {
+ 	gp := getg()
+-	if gp.writebuf != nil && gp.m.dying == 0 {
++	if gp.m.writebufg.ptr() == gp && gp.m.dying == 0 {
+ 		return
+ 	}
+ 	mp := gp.m
+@@ -95,7 +95,7 @@ func printunlock() {
+ 	}
+ }
+ 
+-// write to goroutine-local buffer if diverting output,
++// write to the M's writebuf if diverting this goroutine's output,
+ // or else standard error.
+ func gwrite(b []byte) {
+ 	if len(b) == 0 {
+@@ -107,14 +107,15 @@ func gwrite(b []byte) {
+ 	// than be written to in some buffer, if we're in a panicking state.
+ 	// Note that we can't just clear writebuf in the gp.m.dying case
+ 	// because a panic isn't allowed to have any write barriers.
+-	if gp == nil || gp.writebuf == nil || gp.m.dying > 0 {
++	if gp == nil || gp.m.writebufg.ptr() != gp || gp.m.dying > 0 {
+ 		recordForPanic(b)
+ 		writeErr(b)
+ 		return
+ 	}
+ 
+-	n := copy(gp.writebuf[len(gp.writebuf):cap(gp.writebuf)], b)
+-	gp.writebuf = gp.writebuf[:len(gp.writebuf)+n]
++	mp := gp.m
++	n := copy(mp.writebuf[len(mp.writebuf):cap(mp.writebuf)], b)
++	mp.writebuf = mp.writebuf[:len(mp.writebuf)+n]
+ }
+ 
+ func printsp() {
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+index a8d7173672..ba45e03eb3 100644
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -2028,8 +2028,7 @@ func mexit(osStack bool) {
+ 	if mp.gsignal != nil {
+ 		stackfree(mp.gsignal.stack)
+ 		if valgrindenabled {
+-			valgrindDeregisterStack(mp.gsignal.valgrindStackID)
+-			mp.gsignal.valgrindStackID = 0
++			valgrindDeregisterStack(mp.gsignal)
+ 		}
+ 		// On some platforms, when calling into VDSO (e.g. nanotime)
+ 		// we store our g on the gsignal stack, if there is one.
+@@ -2337,8 +2336,7 @@ func allocm(pp *p, fn func(), id int64) *m {
+ 				systemstack(func() {
+ 					stackfree(freem.g0.stack)
+ 					if valgrindenabled {
+-						valgrindDeregisterStack(freem.g0.valgrindStackID)
+-						freem.g0.valgrindStackID = 0
++						valgrindDeregisterStack(freem.g0)
+ 					}
+ 				})
+ 			}
+@@ -4539,7 +4537,6 @@ func gdestroy(gp *g) {
+ 	gp.paniconfault = false
+ 	gp._defer = nil // should be true already but just in case.
+ 	gp._panic = nil // non-nil for Goexit during panic. points at stack-allocated data.
+-	gp.writebuf = nil
+ 	gp.waitreason = waitReasonZero
+ 	gp.param = nil
+ 	gp.labels = nil
+@@ -5323,7 +5320,7 @@ func malg(stacksize int32) *g {
+ 		systemstack(func() {
+ 			newg.stack = stackalloc(uint32(stacksize))
+ 			if valgrindenabled {
+-				newg.valgrindStackID = valgrindRegisterStack(unsafe.Pointer(newg.stack.lo), unsafe.Pointer(newg.stack.hi))
++				valgrindRegisterStack(newg)
+ 			}
+ 		})
+ 		newg.stackguard0 = newg.stack.lo + stackGuard
+@@ -5534,8 +5531,7 @@ func gfput(pp *p, gp *g) {
+ 		gp.stack.hi = 0
+ 		gp.stackguard0 = 0
+ 		if valgrindenabled {
+-			valgrindDeregisterStack(gp.valgrindStackID)
+-			gp.valgrindStackID = 0
++			valgrindDeregisterStack(gp)
+ 		}
+ 	}
+ 
+@@ -5595,8 +5591,7 @@ retry:
+ 			gp.stack.hi = 0
+ 			gp.stackguard0 = 0
+ 			if valgrindenabled {
+-				valgrindDeregisterStack(gp.valgrindStackID)
+-				gp.valgrindStackID = 0
++				valgrindDeregisterStack(gp)
+ 			}
+ 		})
+ 	}
+@@ -5605,7 +5600,7 @@ retry:
+ 		systemstack(func() {
+ 			gp.stack = stackalloc(startingStackSize)
+ 			if valgrindenabled {
+-				gp.valgrindStackID = valgrindRegisterStack(unsafe.Pointer(gp.stack.lo), unsafe.Pointer(gp.stack.hi))
++				valgrindRegisterStack(gp)
+ 			}
+ 		})
+ 		gp.stackguard0 = gp.stack.lo + stackGuard
+diff --git a/src/runtime/runtime2.go b/src/runtime/runtime2.go
+index 88a0a4aa09..34cb73661a 100644
+--- a/src/runtime/runtime2.go
++++ b/src/runtime/runtime2.go
+@@ -503,7 +503,6 @@ type g struct {
+ 	//    param may point to a savedOpenDeferState.
+ 	param        unsafe.Pointer
+ 	atomicstatus atomic.Uint32
+-	stackLock    uint32 // sigprof/scang lock; TODO: fold in to atomicstatus
+ 	goid         uint64
+ 	schedlink    guintptr
+ 	waitsince    int64      // approx time when the g become blocked
+@@ -549,7 +548,6 @@ type g struct {
+ 	runningCleanups atomic.Bool
+ 	sig             uint32
+ 	secret          int32 // current nesting of runtime/secret.Do calls.
+-	writebuf        []byte
+ 	sigcode0        uintptr
+ 	sigcode1        uintptr
+ 	sigpc           uintptr
+@@ -576,6 +574,10 @@ type g struct {
+ 	// asynchronously preempted.
+ 	xRegs xRegPerG
+ 
++	// valgrind is the Valgrind state of this G's stack. It is empty
++	// unless the runtime is built with Valgrind support (see valgrind.go).
++	valgrind valgrindPerG
++
+ 	// Per-G tracer state.
+ 	trace gTraceState
+ 
+@@ -590,9 +592,7 @@ type g struct {
+ 	// determines how this corresponds to scan work debt.
+ 	gcAssistBytes int64
+ 
+-	// valgrindStackID is used to track what memory is used for stacks when a program is
+-	// built with the "valgrind" build tag, otherwise it is unused.
+-	valgrindStackID uintptr
++	_ [32]byte // measurement control only: pads g back to the 448-byte size class
+ }
+ 
+ // gTrackingPeriod is the number of transitions out of _Grunning between
+@@ -654,6 +654,8 @@ type m struct {
+ 	blocked         bool // m is blocked on a note
+ 	newSigstack     bool // minit on C thread called sigaltstack
+ 	printlock       int8
++	writebuf        []byte        // if writebufg is set, its print output goes here; see gwrite
++	writebufg       guintptr      // must not be rescheduled while set
+ 	incgo           bool          // m is executing a cgo call
+ 	isextra         bool          // m is an extra m
+ 	isExtraInC      bool          // m is an extra m that does not have any Go frames
+diff --git a/src/runtime/sizeof_test.go b/src/runtime/sizeof_test.go
+index 219bcb9259..1cb08075ae 100644
+--- a/src/runtime/sizeof_test.go
++++ b/src/runtime/sizeof_test.go
+@@ -15,14 +15,15 @@ import (
+ 
+ func TestSizeof(t *testing.T) {
+ 	const _64bit = unsafe.Sizeof(uintptr(0)) == 8
+-	const xreg = unsafe.Sizeof(runtime.XRegPerG{}) // Varies per architecture
++	const xreg = unsafe.Sizeof(runtime.XRegPerG{})         // Varies per architecture
++	const valgrind = unsafe.Sizeof(runtime.ValgrindPerG{}) // Non-zero only with the valgrind build tag
+ 	var tests = []struct {
+ 		val    any     // type as a value
+ 		_32bit uintptr // size on 32bit platforms
+ 		_64bit uintptr // size on 64bit platforms
+ 	}{
+-		{runtime.G{}, 288 + xreg, 448 + xreg}, // g, but exported for testing
+-		{runtime.Sudog{}, 64, 104},            // sudog, but exported for testing
++		{runtime.G{}, 260 + xreg + valgrind, 408 + xreg + valgrind}, // g, but exported for testing
++		{runtime.Sudog{}, 64, 104},                                  // sudog, but exported for testing
+ 	}
+ 
+ 	if xreg > runtime.PtrSize {
+diff --git a/src/runtime/stack.go b/src/runtime/stack.go
+index 838090067a..241632a4c3 100644
+--- a/src/runtime/stack.go
++++ b/src/runtime/stack.go
+@@ -1007,11 +1007,7 @@ func copystack(gp *g, newsize uintptr) {
+ 	}
+ 
+ 	if valgrindenabled {
+-		if gp.valgrindStackID == 0 {
+-			gp.valgrindStackID = valgrindRegisterStack(unsafe.Pointer(new.lo), unsafe.Pointer(new.hi))
+-		} else {
+-			valgrindChangeStack(gp.valgrindStackID, unsafe.Pointer(new.lo), unsafe.Pointer(new.hi))
+-		}
++		valgrindChangeStack(gp)
+ 	}
+ 
+ 	// free old stack
+diff --git a/src/runtime/tracestatus.go b/src/runtime/tracestatus.go
+index 6343126faf..d528e44a14 100644
+--- a/src/runtime/tracestatus.go
++++ b/src/runtime/tracestatus.go
+@@ -145,12 +145,15 @@ func goStatusToTraceGoStatus(status uint32, wr waitReason) tracev2.GoStatus {
+ // both Gs and Ps).
+ type traceSchedResourceState struct {
+ 	// statusTraced indicates whether a status event was traced for this resource
+-	// a particular generation.
++	// a particular generation. Bit gen%3 is set if it was for generation gen.
+ 	//
+-	// There are 3 of these because when transitioning across generations, traceAdvance
++	// There are 3 bits because when transitioning across generations, traceAdvance
+ 	// needs to be able to reliably observe whether a status was traced for the previous
+ 	// generation, while we need to clear the value for the next generation.
+-	statusTraced [3]atomic.Uint32
++	//
++	// Accessed atomically. It is a plain uint32 rather than an atomic.Uint32
++	// so that acquireStatus can use the old value returned by atomic.Or32.
++	statusTraced uint32
+ 
+ 	// seq is the sequence counter for this scheduling resource's events.
+ 	// The purpose of the sequence counter is to establish a partial order between
+@@ -169,7 +172,8 @@ type traceSchedResourceState struct {
+ //
+ //go:nosplit
+ func (r *traceSchedResourceState) acquireStatus(gen uintptr) bool {
+-	if !r.statusTraced[gen%3].CompareAndSwap(0, 1) {
++	bit := uint32(1) << (gen % 3)
++	if atomic.Or32(&r.statusTraced, bit)&bit != 0 {
+ 		return false
+ 	}
+ 	r.readyNextGen(gen)
+@@ -180,18 +184,18 @@ func (r *traceSchedResourceState) acquireStatus(gen uintptr) bool {
+ func (r *traceSchedResourceState) readyNextGen(gen uintptr) {
+ 	nextGen := traceNextGen(gen)
+ 	r.seq[nextGen%2] = 0
+-	r.statusTraced[nextGen%3].Store(0)
++	atomic.And32(&r.statusTraced, ^(uint32(1) << (nextGen % 3)))
+ }
+ 
+ // statusWasTraced returns true if the sched resource's status was already acquired for tracing.
+ func (r *traceSchedResourceState) statusWasTraced(gen uintptr) bool {
+-	return r.statusTraced[gen%3].Load() != 0
++	return atomic.Load(&r.statusTraced)&(1<<(gen%3)) != 0
+ }
+ 
+ // setStatusTraced indicates that the resource's status was already traced, for example
+ // when a goroutine is created.
+ func (r *traceSchedResourceState) setStatusTraced(gen uintptr) {
+-	r.statusTraced[gen%3].Store(1)
++	atomic.Or32(&r.statusTraced, 1<<(gen%3))
+ }
+ 
+ // nextSeq returns the next sequence number for the resource.
+diff --git a/src/runtime/valgrind.go b/src/runtime/valgrind.go
+index 3933d63e6b..869a01663b 100644
+--- a/src/runtime/valgrind.go
++++ b/src/runtime/valgrind.go
+@@ -69,22 +69,41 @@ const (
+ //go:noescape
+ func valgrindClientRequest(uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) uintptr
+ 
++// valgrindPerG is the Valgrind state of a G's stack.
++type valgrindPerG struct {
++	// stackID identifies the G's stack to Valgrind. It is 0 if the
++	// stack is not registered.
++	stackID uintptr
++}
++
++// valgrindRegisterStack tells Valgrind that gp.stack is a stack.
++//
+ //go:nosplit
+-func valgrindRegisterStack(start, end unsafe.Pointer) uintptr {
++func valgrindRegisterStack(gp *g) {
+ 	// VALGRIND_STACK_REGISTER
+-	return valgrindClientRequest(vg_userreq__stack_register, uintptr(start), uintptr(end), 0, 0, 0)
++	gp.valgrind.stackID = valgrindClientRequest(vg_userreq__stack_register, gp.stack.lo, gp.stack.hi, 0, 0, 0)
+ }
+ 
++// valgrindDeregisterStack tells Valgrind that gp's stack is no longer a stack.
++//
+ //go:nosplit
+-func valgrindDeregisterStack(id uintptr) {
++func valgrindDeregisterStack(gp *g) {
+ 	// VALGRIND_STACK_DEREGISTER
+-	valgrindClientRequest(vg_userreq__stack_deregister, id, 0, 0, 0, 0)
++	valgrindClientRequest(vg_userreq__stack_deregister, gp.valgrind.stackID, 0, 0, 0, 0)
++	gp.valgrind.stackID = 0
+ }
+ 
++// valgrindChangeStack tells Valgrind that gp's stack moved to gp.stack,
++// registering it if it is not registered yet.
++//
+ //go:nosplit
+-func valgrindChangeStack(id uintptr, start, end unsafe.Pointer) {
++func valgrindChangeStack(gp *g) {
++	if gp.valgrind.stackID == 0 {
++		valgrindRegisterStack(gp)
++		return
++	}
+ 	// VALGRIND_STACK_CHANGE
+-	valgrindClientRequest(vg_userreq__stack_change, id, uintptr(start), uintptr(end), 0, 0)
++	valgrindClientRequest(vg_userreq__stack_change, gp.valgrind.stackID, gp.stack.lo, gp.stack.hi, 0, 0)
+ }
+ 
+ //go:nosplit
+diff --git a/src/runtime/valgrind0.go b/src/runtime/valgrind0.go
+index adafa3001a..9ffdda9991 100644
+--- a/src/runtime/valgrind0.go
++++ b/src/runtime/valgrind0.go
+@@ -12,9 +12,11 @@ import "unsafe"
+ 
+ const valgrindenabled = false
+ 
+-func valgrindRegisterStack(start, end unsafe.Pointer) uintptr       { return 0 }
+-func valgrindDeregisterStack(id uintptr)                            {}
+-func valgrindChangeStack(id uintptr, start, end unsafe.Pointer)     {}
++type valgrindPerG struct{}
++
++func valgrindRegisterStack(gp *g)                                   {}
++func valgrindDeregisterStack(gp *g)                                 {}
++func valgrindChangeStack(gp *g)                                     {}
+ func valgrindMalloc(addr unsafe.Pointer, size uintptr)              {}
+ func valgrindFree(addr unsafe.Pointer)                              {}
+ func valgrindCreateMempool(addr unsafe.Pointer)                     {}
