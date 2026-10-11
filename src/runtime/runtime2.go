@@ -549,7 +549,6 @@ type g struct {
 	runningCleanups atomic.Bool
 	sig             uint32
 	secret          int32 // current nesting of runtime/secret.Do calls.
-	writebuf        []byte
 	sigcode0        uintptr
 	sigcode1        uintptr
 	sigpc           uintptr
@@ -559,7 +558,7 @@ type g struct {
 	startpc         uintptr         // pc of goroutine function
 	racectx         uintptr
 	waiting         *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
-	cgoCtxt         []uintptr      // cgo traceback context
+	cgoCtxt         *[]uintptr     // cgo traceback contexts, allocated on first use; see cgocallbackg1
 	labels          unsafe.Pointer // profiler labels
 	timer           *timer         // cached timer for time.Sleep
 	sleepWhen       int64          // when to sleep until
@@ -724,6 +723,9 @@ type m struct {
 
 	// self points this M until mexit clears it to return nil.
 	self mWeakPointer
+
+	writebuf  []byte   // if writebufg is set, its print output goes here; see gwrite
+	writebufg guintptr // must not be rescheduled while set
 }
 
 const mRedZoneSize = (16 << 3) * asanenabledBit // redZoneSize(2048)

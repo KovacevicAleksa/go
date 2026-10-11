@@ -29,12 +29,9 @@ func (l *dloggerImpl) S(x string) *dloggerImpl   { return l.s(x) }
 func (l *dloggerImpl) PC(x uintptr) *dloggerImpl { return l.pc(x) }
 
 func DumpDebugLog() string {
-	gp := getg()
-	gp.writebuf = make([]byte, 0, 1<<20)
-	printDebugLogImpl()
-	buf := gp.writebuf
-	gp.writebuf = nil
-
+	buf := capturePrint(make([]byte, 0, 1<<20), func() {
+		printDebugLogImpl()
+	})
 	return string(buf)
 }
 
