@@ -150,7 +150,10 @@ type traceSchedResourceState struct {
 	// There are 3 of these because when transitioning across generations, traceAdvance
 	// needs to be able to reliably observe whether a status was traced for the previous
 	// generation, while we need to clear the value for the next generation.
-	statusTraced [3]atomic.Uint32
+	//
+	// Accessed atomically. These are plain uint8s rather than atomic.Uint8s
+	// because acquireStatus needs atomic.Xchg8.
+	statusTraced [3]uint8
 
 	// seq is the sequence counter for this scheduling resource's events.
 	// The purpose of the sequence counter is to establish a partial order between
@@ -159,7 +162,7 @@ type traceSchedResourceState struct {
 	// There are two of these so that we can reset the counter on each generation.
 	// This saves space in the resulting trace by keeping the counter small and allows
 	// GoStatus and GoCreate events to omit a sequence number (implicitly 0).
-	seq [2]uint64
+	seq [2]uint32
 }
 
 // acquireStatus acquires the right to emit a Status event for the scheduling resource.
@@ -169,7 +172,7 @@ type traceSchedResourceState struct {
 //
 //go:nosplit
 func (r *traceSchedResourceState) acquireStatus(gen uintptr) bool {
-	if !r.statusTraced[gen%3].CompareAndSwap(0, 1) {
+	if atomic.Xchg8(&r.statusTraced[gen%3], 1) != 0 {
 		return false
 	}
 	r.readyNextGen(gen)
@@ -180,18 +183,18 @@ func (r *traceSchedResourceState) acquireStatus(gen uintptr) bool {
 func (r *traceSchedResourceState) readyNextGen(gen uintptr) {
 	nextGen := traceNextGen(gen)
 	r.seq[nextGen%2] = 0
-	r.statusTraced[nextGen%3].Store(0)
+	atomic.Store8(&r.statusTraced[nextGen%3], 0)
 }
 
 // statusWasTraced returns true if the sched resource's status was already acquired for tracing.
 func (r *traceSchedResourceState) statusWasTraced(gen uintptr) bool {
-	return r.statusTraced[gen%3].Load() != 0
+	return atomic.Load8(&r.statusTraced[gen%3]) != 0
 }
 
 // setStatusTraced indicates that the resource's status was already traced, for example
 // when a goroutine is created.
 func (r *traceSchedResourceState) setStatusTraced(gen uintptr) {
-	r.statusTraced[gen%3].Store(1)
+	atomic.Store8(&r.statusTraced[gen%3], 1)
 }
 
 // nextSeq returns the next sequence number for the resource.
