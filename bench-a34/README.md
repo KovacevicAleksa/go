@@ -20,6 +20,14 @@ linux/arm64, all against Go master at 3b98eddbcd:
 - `ctl4.diff`: new4min padded back to 416 bytes, to separate the effect of the size class from the code.
 - `master`: Go at 3b98eddbcd with no change (no diff file).
 
+Since 2026-10-11 the workflow runs the chain variants instead, against Go master at dfe2e7bfb4 (with g.stackLock already removed):
+
+- `chain-base.diff`: valgrindStackID only in valgrind builds, g at 448 bytes.
+- `chain-a5a.diff`: chain-base plus one byte per trace status flag, the parser comparing sequence counters modulo 2^32, and 32-bit trace sequence counters, g at 424 bytes.
+- `chain-final.diff`: chain-a5a plus writebuf moved to m and g.cgoCtxt allocated on first use, g at 384 bytes.
+- `chain-ctl.diff`: chain-final padded back to 416 bytes, to separate the effect of the size class from the code.
+- `master`: Go at dfe2e7bfb4 with no change.
+
 `bench.sh` builds Go from source, builds the benchmark binaries for each
 variant, runs them in turn, compares them with benchstat, and runs the tests
 of one variant (see the workflow).

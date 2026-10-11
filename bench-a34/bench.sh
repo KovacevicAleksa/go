@@ -16,6 +16,12 @@
 #   new4min new4 with the field order of master except for the moves
 #          needed to reach 384, plus the parser compare modulo 2^32
 #   ctl4   new4min padded back to 416 bytes (same code, 416 size class)
+# The chain variants are diffs against BASE=dfe2e7bfb4 (master with
+# A1, 2026-10-11), which the workflow sets:
+#   chain-base  A2 patch set 2, g at 448
+#   chain-a5a   chain-base + A3 + parser + A5a, g at 424 (still class 448)
+#   chain-final the whole chain as it will be mailed, g at 384
+#   chain-ctl   chain-final padded back to 416 bytes (same code, class 416)
 # VARIANTS selects which to run. The order is rotated every round, so no
 # variant always runs first or last.
 # Builds Go at BASE from source, builds every benchmark binary once per
@@ -26,7 +32,7 @@
 # Output: <work dir>/results/
 set -euo pipefail
 
-BASE=3b98eddbcd66230a78c4893f32099b5d3045a334
+BASE=${BASE:-3b98eddbcd66230a78c4893f32099b5d3045a334}
 VARIANTS=${VARIANTS:-base new new2 new3a new3b ctl2}
 TESTED=${TESTED:-new3b}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -80,6 +86,9 @@ run() {
 		-test.benchmem -test.cpu="$CPUS" >> "$R/runtime-$v.txt"
 	"$d/runtime.test" -test.run='^$' -test.bench='^BenchmarkGoroutineProfile$' \
 		-test.benchmem -test.cpu="$(nproc)" >> "$R/runtime-$v.txt"
+	"$d/runtime.test" -test.run='^$' -test.trace=/dev/null \
+		-test.bench='^Benchmark(CreateGoroutines|CreateGoroutinesParallel|ChanSync|ChanProdCons0|PingPongHog)$' \
+		-test.benchmem -test.cpu="$CPUS" >> "$R/traced-$v.txt"
 	"$d/http.test" -test.run='^$' \
 		-test.bench='^Benchmark(ServerFakeConnNoKeepAlive|ServerFakeConnWithKeepAliveLite|ClientServer)$' \
 		-test.benchmem -test.cpu="$CPUS" >> "$R/http-$v.txt"
@@ -101,14 +110,14 @@ for ((i = 0; i < ROUNDS; i++)); do
 done
 
 BENCHSTAT=$(go env GOPATH)/bin/benchstat
-for b in runtime http spawn memg; do
+for b in runtime traced http spawn memg; do
 	args=()
 	for v in $VARIANTS; do
 		args+=("$v=$R/$b-$v.txt")
 	done
 	"$BENCHSTAT" "${args[@]}" > "$R/$b-benchstat.txt"
 	"$BENCHSTAT" -format csv "${args[@]}" > "$R/$b-benchstat.csv"
-	"$BENCHSTAT" ctl4="$R/$b-ctl4.txt" new4min="$R/$b-new4min.txt" new4="$R/$b-new4.txt" > "$R/$b-benchstat-vs-ctl4.txt" || true
+	"$BENCHSTAT" ctl="$R/$b-${CTL:-ctl4}.txt" tested="$R/$b-$TESTED.txt" > "$R/$b-benchstat-vs-ctl.txt" || true
 done
 
 # Correctness of the tested variant on this platform.
@@ -133,6 +142,7 @@ check pprof-short "$GO" test -short -count=1 runtime/pprof
 check asan-build "$GO" build -asan runtime
 check race-short "$GO" test -race -short -count=1 -run 'Stack|Print|Hexdump|DebugLog|Trace' runtime
 check cgo "$GO" test -count=1 -run 'Cgo' runtime
+check race-trace "$GO" test -race -short -count=1 runtime/trace
 if [ "$(uname -m)" = x86_64 ]; then
 	check sizeof-386 env GOARCH=386 "$GO" test -count=1 -run '^TestSizeof$' runtime
 fi
