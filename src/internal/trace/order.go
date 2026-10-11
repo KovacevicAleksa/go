@@ -1296,8 +1296,11 @@ func makeSeq(gen, seq uint64) seqCounter {
 }
 
 // succeeds returns true if a is the immediate successor of b.
+//
+// The comparison is modulo 1<<32, so a runtime may keep each counter in
+// a uint32 and let it wrap to 0 within a generation.
 func (a seqCounter) succeeds(b seqCounter) bool {
-	return a.gen == b.gen && a.seq == b.seq+1
+	return a.gen == b.gen && uint32(a.seq) == uint32(b.seq+1)
 }
 
 // String returns a debug string representation of the seqCounter.
