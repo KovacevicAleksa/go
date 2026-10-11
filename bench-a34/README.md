@@ -31,3 +31,9 @@ Since 2026-10-11 the workflow runs the chain variants instead, against Go master
 `bench.sh` builds Go from source, builds the benchmark binaries for each
 variant, runs them in turn, compares them with benchstat, and runs the tests
 of one variant (see the workflow).
+
+`layout.sh` builds the runtime benchmarks of each chain variant with the
+default function layout and with `-ldflags=-randlayout=1..7`, and reports how
+far each benchmark moves across layouts. It checks whether a difference
+between variants comes from the change or from where the linker places code.
+Since 2026-10-11 evening the workflow runs `layout.sh` instead of `bench.sh`.

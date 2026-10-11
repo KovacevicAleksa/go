@@ -28,27 +28,26 @@ jobs:
           go-version: stable
           cache: false
       - run: go install golang.org/x/perf/cmd/benchstat@latest
-      - run: bench-a34/bench.sh "$RUNNER_TEMP/w" 15
+      - run: bench-a34/layout.sh "$RUNNER_TEMP/w" 4
         env:
           BASE: dfe2e7bfb454f71784ee1aeeac44063fd582f9f3
           VARIANTS: master chain-base chain-a5a chain-final chain-ctl
-          TESTED: chain-final
-          CTL: chain-ctl
+          SEEDS: 7
       - name: Summary
         if: always()
         run: |
-          R=$RUNNER_TEMP/w/results
+          R=$RUNNER_TEMP/w/layout
           {
             echo "## TEST/WIP, benchmark only: ${{ matrix.runner }} #${{ matrix.copy }}"
             echo '```'
             grep -E 'Model name|^CPU\(s\)' "$R/machine.txt" || true
             cat "$R/go-version.txt" 2>/dev/null || true
-            for b in runtime traced http spawn memg; do cat "$R/$b-benchstat.txt" 2>/dev/null || true; done
-            cat "$R/tests.txt" 2>/dev/null || true
+            cat "$R/layout-summary.txt" 2>/dev/null || true
+            cat "$R/pooled-benchstat.txt" 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: bench-a34-${{ matrix.runner }}-${{ matrix.copy }}
-          path: ${{ runner.temp }}/w/results
+          path: ${{ runner.temp }}/w/layout
