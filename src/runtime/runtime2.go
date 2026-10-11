@@ -503,6 +503,7 @@ type g struct {
 	//    param may point to a savedOpenDeferState.
 	param        unsafe.Pointer
 	atomicstatus atomic.Uint32
+	trace        gTraceState // per-G tracer state
 	goid         uint64
 	schedlink    guintptr
 	waitsince    int64      // approx time when the g become blocked
@@ -578,9 +579,6 @@ type g struct {
 	// valgrind is the Valgrind state of this G's stack. It is empty
 	// unless the runtime is built with Valgrind support (see valgrind.go).
 	valgrind valgrindPerG
-
-	// Per-G tracer state.
-	trace gTraceState
 
 	// Per-G GC state
 
