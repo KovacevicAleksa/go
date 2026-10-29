@@ -897,7 +897,7 @@ func gcFlushBgCredit(scanWork int64) {
 // point.
 //
 // scanstack is marked go:systemstack because it must not be preempted
-// while using a workbuf.
+// while using its P's gcWork and stack scan buffer pool.
 //
 //go:nowritebarrier
 //go:systemstack
@@ -951,6 +951,7 @@ func scanstack(gp *g, gcw *gcWork) int64 {
 
 	var state stackScanState
 	state.stack = gp.stack
+	state.pool = &gcw.stackBufs
 
 	if stackTraceDebug {
 		println("stack trace goroutine", gp.goid)
@@ -1060,7 +1061,7 @@ func scanstack(gp *g, gcw *gcWork) int64 {
 			}
 		}
 		x.nobj = 0
-		putempty((*workbuf)(unsafe.Pointer(x)))
+		state.pool.put((*stackScanBufHdr)(unsafe.Pointer(x)))
 	}
 	if state.buf != nil || state.cbuf != nil || state.freeBuf != nil {
 		throw("remaining pointer buffers")

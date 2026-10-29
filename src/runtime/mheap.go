@@ -978,9 +978,10 @@ func (h *mheap) reclaimChunk(arenas []arenaIdx, pageIdx, n uintptr) uintptr {
 type spanAllocType uint8
 
 const (
-	spanAllocHeap    spanAllocType = iota // heap span
-	spanAllocStack                        // stack span
-	spanAllocWorkBuf                      // work buf span
+	spanAllocHeap         spanAllocType = iota // heap span
+	spanAllocStack                             // stack span
+	spanAllocWorkBuf                           // work buf span
+	spanAllocStackScanBuf                      // stack scan buffer span (see mgcstack.go)
 )
 
 // manual returns true if the span allocation is manually managed.
@@ -1409,7 +1410,7 @@ HaveSpan:
 		atomic.Xaddint64(&stats.inHeap, int64(nbytes))
 	case spanAllocStack:
 		atomic.Xaddint64(&stats.inStacks, int64(nbytes))
-	case spanAllocWorkBuf:
+	case spanAllocWorkBuf, spanAllocStackScanBuf:
 		atomic.Xaddint64(&stats.inWorkBufs, int64(nbytes))
 	}
 	memstats.heapStats.release()
@@ -1763,7 +1764,7 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
 		atomic.Xaddint64(&stats.inHeap, -int64(nbytes))
 	case spanAllocStack:
 		atomic.Xaddint64(&stats.inStacks, -int64(nbytes))
-	case spanAllocWorkBuf:
+	case spanAllocWorkBuf, spanAllocStackScanBuf:
 		atomic.Xaddint64(&stats.inWorkBufs, -int64(nbytes))
 	}
 	memstats.heapStats.release()

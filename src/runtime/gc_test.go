@@ -738,6 +738,52 @@ func BenchmarkScanStackNoLocals(b *testing.B) {
 	close(teardown)
 }
 
+type scanStackObj struct {
+	next *scanStackObj
+	pad  [6]uintptr
+}
+
+//go:noinline
+func scanStackBlock(d int, a *scanStackObj, ready chan<- bool, done <-chan bool, exited *sync.WaitGroup) {
+	// o is a stack object: its address is taken, but it does not escape.
+	o := scanStackObj{next: a}
+	if d == 0 {
+		ready <- true
+		<-done
+		runtime.KeepAlive(o.next)
+		exited.Done()
+		return
+	}
+	scanStackBlock(d-1, &o, ready, done, exited)
+}
+
+// BenchmarkScanStackManyGoroutines measures a GC cycle with many
+// parked goroutines whose small stacks hold stack objects.
+func BenchmarkScanStackManyGoroutines(b *testing.B) {
+	for _, n := range []int{10000, 100000} {
+		for _, depth := range []int{1, 10} {
+			b.Run(fmt.Sprintf("n=%d/depth=%d", n, depth), func(b *testing.B) {
+				ready := make(chan bool)
+				done := make(chan bool)
+				var exited sync.WaitGroup
+				exited.Add(n)
+				for range n {
+					go scanStackBlock(depth, new(scanStackObj), ready, done, &exited)
+					<-ready
+				}
+				runtime.GC()
+				b.ResetTimer()
+				for range b.N {
+					runtime.GC()
+				}
+				b.StopTimer()
+				close(done)
+				exited.Wait()
+			})
+		}
+	}
+}
+
 func BenchmarkMSpanCountAlloc(b *testing.B) {
 	// Allocate one dummy mspan for the whole benchmark.
 	s := runtime.AllocMSpan()
@@ -923,4 +969,87 @@ func TestPCAsPointer(t *testing.T) {
 	ptr := unsafe.Pointer(pc)
 	runtime.GC()
 	runtime.KeepAlive(ptr)
+}
+
+func TestStackScanBufPool(t *testing.T) {
+	// get allocates when the pool is empty, put and get are LIFO,
+	// and free frees up to n buffers and reports how many.
+	var p runtime.StackScanBufPool
+	const n = 10
+	var bufs [n]uintptr
+	for i := range bufs {
+		bufs[i] = p.Get()
+	}
+	if got := p.Len(); got != 0 {
+		t.Fatalf("pool holds %d buffers after %d gets, want 0", got, n)
+	}
+	for _, b := range bufs {
+		p.Put(b)
+	}
+	if got := p.Len(); got != n {
+		t.Fatalf("pool holds %d buffers after %d puts, want %d", got, n, n)
+	}
+	if b := p.Get(); b != bufs[n-1] {
+		t.Fatalf("get returned %#x, want the last put, %#x", b, bufs[n-1])
+	} else {
+		p.Put(b)
+	}
+	if got := p.Free(4); got != 4 {
+		t.Fatalf("Free(4) freed %d buffers, want 4", got)
+	}
+	if got := p.Len(); got != n-4 {
+		t.Fatalf("pool holds %d buffers after freeing 4, want %d", got, n-4)
+	}
+	if got := p.Free(n); got != n-4 {
+		t.Fatalf("Free(%d) freed %d buffers, want the remaining %d", n, got, n-4)
+	}
+	if got := p.Free(1); got != 0 {
+		t.Fatalf("Free(1) on an empty pool freed %d buffers, want 0", got)
+	}
+	if got := p.Len(); got != 0 {
+		t.Fatalf("pool holds %d buffers after freeing all, want 0", got)
+	}
+}
+
+func TestStackScanBufPoolSweep(t *testing.T) {
+	// Scanning a deep stack with many stack objects grows the scanning
+	// P's pool. The sweeper then frees all pools, asynchronously, so
+	// the test waits for that.
+	const depth = 4000
+	ready := make(chan bool)
+	done := make(chan bool)
+	var exited sync.WaitGroup
+	exited.Add(4)
+	for range 4 {
+		go scanStackBlock(depth, new(scanStackObj), ready, done, &exited)
+		<-ready
+	}
+	runtime.GC()
+	close(done)
+	exited.Wait()
+
+	start := time.Now()
+	nextGC := start.Add(time.Second)
+	last := -1
+	for {
+		n := runtime.StackScanBufsPooled()
+		if n == 0 {
+			return
+		}
+		if n > 0 {
+			last = n
+		}
+		now := time.Now()
+		if now.Sub(start) > 10*time.Second {
+			t.Fatalf("largest pool holds %d stack scan buffers after sweeping, want 0", last)
+		}
+		if now.After(nextGC) {
+			// The sweeper can park without freeing if it was still
+			// finishing an earlier cycle when this one started.
+			// The next cycle wakes it again.
+			runtime.GC()
+			nextGC = now.Add(time.Second)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

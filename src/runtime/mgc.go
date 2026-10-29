@@ -2093,9 +2093,11 @@ func gcSweep(mode gcMode) bool {
 		// Sweep all spans eagerly.
 		for sweepone() != ^uintptr(0) {
 		}
-		// Free workbufs and span rings eagerly.
+		// Free workbufs, stack scan buffers and span rings eagerly.
 		prepareFreeWorkbufs()
 		for freeSomeWbufs(false) {
+		}
+		for freeSomeStackScanBufs(false) {
 		}
 		freeDeadSpanSPMCs()
 		// All "free" events for this mark/sweep cycle have

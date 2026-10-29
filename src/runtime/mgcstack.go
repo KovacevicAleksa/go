@@ -102,45 +102,148 @@ import (
 
 const stackTraceDebug = false
 
+// The buffers used while scanning a stack come from a pool owned by
+// the P doing the scan (stackScanBufPool). Each buffer is
+// stackScanBufPages pages, allocated as a manual span of its own.
+const stackScanBufPages = 1
+
 // Buffer for pointers found during stack tracing.
-// Must be smaller than or equal to workbuf.
 type stackWorkBuf struct {
 	_ sys.NotInHeap
 	stackWorkBufHdr
-	obj [(_WorkbufSize - unsafe.Sizeof(stackWorkBufHdr{})) / goarch.PtrSize]uintptr
+	obj [(stackScanBufPages*pageSize - unsafe.Sizeof(stackWorkBufHdr{})) / goarch.PtrSize]uintptr
 }
 
 // Header declaration must come after the buf declaration above, because of issue #14620.
 type stackWorkBufHdr struct {
 	_ sys.NotInHeap
-	workbufhdr
-	next *stackWorkBuf // linked list of workbufs
-	// Note: we could theoretically repurpose lfnode.next as this next pointer.
-	// It would save 1 word, but that probably isn't worth busting open
-	// the lfnode API.
+	stackScanBufHdr
+	next *stackWorkBuf // linked list of buffers
 }
 
 // Buffer for stack objects found on a goroutine stack.
-// Must be smaller than or equal to workbuf.
 type stackObjectBuf struct {
 	_ sys.NotInHeap
 	stackObjectBufHdr
-	obj [(_WorkbufSize - unsafe.Sizeof(stackObjectBufHdr{})) / unsafe.Sizeof(stackObject{})]stackObject
+	obj [(stackScanBufPages*pageSize - unsafe.Sizeof(stackObjectBufHdr{})) / unsafe.Sizeof(stackObject{})]stackObject
 }
 
 type stackObjectBufHdr struct {
 	_ sys.NotInHeap
-	workbufhdr
+	stackScanBufHdr
 	next *stackObjectBuf
 }
 
-func init() {
-	if unsafe.Sizeof(stackWorkBuf{}) > unsafe.Sizeof(workbuf{}) {
-		panic("stackWorkBuf too big")
+// stackScanBufHdr is the header shared by stackWorkBuf and
+// stackObjectBuf. Both kinds of buffer fit in a span of
+// stackScanBufPages pages and come from the same pool.
+type stackScanBufHdr struct {
+	_        sys.NotInHeap
+	nobj     int
+	nextFree *stackScanBufHdr // next buffer in a stackScanBufPool
+}
+
+// A stackScanBufPool is a P's pool of free buffers for stack scanning:
+// a LIFO list linked through stackScanBufHdr.nextFree. The P uses it
+// without synchronization while scanning stacks in the mark phase.
+// The pool grows to the largest number of buffers one scan on that P
+// needed at once. After the mark phase the sweeper frees all of its
+// buffers, see freeSomeStackScanBufs.
+type stackScanBufPool struct {
+	head *stackScanBufHdr
+}
+
+// get returns a buffer from the pool, allocating one from the heap if
+// the pool is empty. The buffer must be returned with put before the
+// scan ends.
+//
+//go:nowritebarrier
+func (p *stackScanBufPool) get() *stackScanBufHdr {
+	lockWithRankMayAcquire(&mheap_.lock, lockRankMheap)
+
+	if b := p.head; b != nil {
+		p.head = b.nextFree
+		b.nextFree = nil
+		return b
 	}
-	if unsafe.Sizeof(stackObjectBuf{}) > unsafe.Sizeof(workbuf{}) {
-		panic("stackObjectBuf too big")
+	var s *mspan
+	systemstack(func() {
+		s = mheap_.allocManual(stackScanBufPages, spanAllocStackScanBuf)
+	})
+	if s == nil {
+		throw("out of memory")
 	}
+	b := (*stackScanBufHdr)(unsafe.Pointer(s.base()))
+	b.nobj = 0
+	b.nextFree = nil
+	return b
+}
+
+// put returns an empty buffer taken with get to the pool.
+//
+//go:nowritebarrier
+func (p *stackScanBufPool) put(b *stackScanBufHdr) {
+	if b.nobj != 0 {
+		throw("stackScanBufPool.put: buffer not empty")
+	}
+	b.nextFree = p.head
+	p.head = b
+}
+
+// free frees up to n buffers from the pool to the heap and returns the
+// number it freed, which is 0 once the pool is empty.
+//
+// This must only be called when gcphase == _GCoff, so that no stack
+// is being scanned, and with preemption disabled or the world stopped,
+// so that the phase cannot change during the call. See freeManual.
+func (p *stackScanBufPool) free(n int) int {
+	freed := 0
+	systemstack(func() {
+		for freed < n && p.head != nil {
+			b := p.head
+			p.head = b.nextFree
+			mheap_.freeManual(spanOfUnchecked(uintptr(unsafe.Pointer(b))), spanAllocStackScanBuf)
+			freed++
+		}
+	})
+	return freed
+}
+
+// freeSomeStackScanBufs frees the buffers in every P's stack scan
+// buffer pool, in batches. It returns true if it should be called
+// again to free more.
+//
+// It is called by the background sweeper, concurrently with the
+// mutator, and by gcSweep with the world stopped and preemptible
+// false. The pools are only used by their Ps during the mark phase, so
+// nothing else touches them while gcphase == _GCoff.
+func freeSomeStackScanBufs(preemptible bool) bool {
+	const batchSize = 64 // ~40 ns per buffer.
+	// Disable preemption, so that once we have checked the phase it
+	// cannot change under us: it only changes with the world stopped.
+	// freeSomeWbufs and freeDeadSpanSPMCs get the same from their locks.
+	mp := acquirem()
+	if gcphase != _GCoff {
+		releasem(mp)
+		return false
+	}
+	gp := mp.curg
+	n := 0
+	for _, pp := range allp {
+		for {
+			if n == batchSize || (preemptible && gp.preempt) {
+				releasem(mp)
+				return true
+			}
+			freed := pp.gcw.stackBufs.free(batchSize - n)
+			if freed == 0 {
+				break
+			}
+			n += freed
+		}
+	}
+	releasem(mp)
+	return false
 }
 
 // A stackObject represents a variable on the stack that has had
@@ -168,6 +271,11 @@ func (obj *stackObject) setRecord(r *stackObjectRecord) {
 type stackScanState struct {
 	// stack limits
 	stack stack
+
+	// pool is the stack scan buffer pool of the P running this scan.
+	// The pointer and object buffers below are taken from and
+	// returned to it.
+	pool *stackScanBufPool
 
 	// conservative indicates that the next frame must be scanned conservatively.
 	// This applies only to the innermost frame at an async safe-point.
@@ -210,7 +318,7 @@ func (s *stackScanState) putPtr(p uintptr, conservative bool) {
 	buf := *head
 	if buf == nil {
 		// Initial setup.
-		buf = (*stackWorkBuf)(unsafe.Pointer(getempty()))
+		buf = (*stackWorkBuf)(unsafe.Pointer(s.pool.get()))
 		buf.nobj = 0
 		buf.next = nil
 		*head = buf
@@ -219,7 +327,7 @@ func (s *stackScanState) putPtr(p uintptr, conservative bool) {
 			buf = s.freeBuf
 			s.freeBuf = nil
 		} else {
-			buf = (*stackWorkBuf)(unsafe.Pointer(getempty()))
+			buf = (*stackWorkBuf)(unsafe.Pointer(s.pool.get()))
 		}
 		buf.nobj = 0
 		buf.next = *head
@@ -244,7 +352,7 @@ func (s *stackScanState) getPtr() (p uintptr, conservative bool) {
 		if buf.nobj == 0 {
 			if s.freeBuf != nil {
 				// Free old freeBuf.
-				putempty((*workbuf)(unsafe.Pointer(s.freeBuf)))
+				s.pool.put((*stackScanBufHdr)(unsafe.Pointer(s.freeBuf)))
 			}
 			// Move buf to the freeBuf.
 			s.freeBuf = buf
@@ -260,7 +368,7 @@ func (s *stackScanState) getPtr() (p uintptr, conservative bool) {
 	}
 	// No more data in either list.
 	if s.freeBuf != nil {
-		putempty((*workbuf)(unsafe.Pointer(s.freeBuf)))
+		s.pool.put((*stackScanBufHdr)(unsafe.Pointer(s.freeBuf)))
 		s.freeBuf = nil
 	}
 	return 0, false
@@ -271,7 +379,7 @@ func (s *stackScanState) addObject(addr uintptr, r *stackObjectRecord) {
 	x := s.tail
 	if x == nil {
 		// initial setup
-		x = (*stackObjectBuf)(unsafe.Pointer(getempty()))
+		x = (*stackObjectBuf)(unsafe.Pointer(s.pool.get()))
 		x.next = nil
 		s.head = x
 		s.tail = x
@@ -281,7 +389,7 @@ func (s *stackScanState) addObject(addr uintptr, r *stackObjectRecord) {
 	}
 	if x.nobj == len(x.obj) {
 		// full buffer - allocate a new buffer, add to end of linked list
-		y := (*stackObjectBuf)(unsafe.Pointer(getempty()))
+		y := (*stackObjectBuf)(unsafe.Pointer(s.pool.get()))
 		y.next = nil
 		x.next = y
 		s.tail = y

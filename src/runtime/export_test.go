@@ -2187,3 +2187,57 @@ func FuncNamePiecesForPrint(name string) (string, string, string, string, string
 }
 
 var InHeapOrStack = inHeapOrStack
+
+// A StackScanBufPool is a stackScanBufPool for tests. Buffers are
+// handed out as uintptr, since they live outside the heap and may be
+// freed by Free while the test still holds them.
+type StackScanBufPool stackScanBufPool
+
+func (p *StackScanBufPool) Get() uintptr {
+	return uintptr(unsafe.Pointer((*stackScanBufPool)(p).get()))
+}
+
+func (p *StackScanBufPool) Put(b uintptr) {
+	(*stackScanBufPool)(p).put((*stackScanBufHdr)(unsafe.Pointer(b)))
+}
+
+// Len returns the number of buffers in the pool.
+func (p *StackScanBufPool) Len() int {
+	n := 0
+	for b := p.head; b != nil; b = b.nextFree {
+		n++
+	}
+	return n
+}
+
+// Free frees up to n buffers from the pool and returns the number it
+// freed. It waits for a GC cycle in progress to end first.
+func (p *StackScanBufPool) Free(n int) int {
+	for {
+		mp := acquirem()
+		if gcphase == _GCoff {
+			freed := (*stackScanBufPool)(p).free(n)
+			releasem(mp)
+			return freed
+		}
+		releasem(mp)
+		Gosched()
+	}
+}
+
+// StackScanBufsPooled returns the largest number of buffers in any P's
+// stack scan buffer pool, or -1 if a GC cycle is in progress.
+func StackScanBufsPooled() int {
+	stw := stopTheWorld(stwForTestStackScanBufsPooled)
+	n := -1
+	if gcphase == _GCoff {
+		n = 0
+		for _, pp := range allp {
+			if l := (*StackScanBufPool)(&pp.gcw.stackBufs).Len(); l > n {
+				n = l
+			}
+		}
+	}
+	startTheWorld(stw)
+	return n
+}

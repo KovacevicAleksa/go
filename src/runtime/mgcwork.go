@@ -132,6 +132,10 @@ type gcWork struct {
 	// enlistWorker is called directly instead.
 	mayNeedWorker bool
 
+	// stackBufs is the P's pool of free buffers for stack scanning.
+	// See stackScanBufPool in mgcstack.go.
+	stackBufs stackScanBufPool
+
 	// stats are scan stats broken down by size class.
 	stats [gc.NumSizeClasses]sizeClassScanStats
 }

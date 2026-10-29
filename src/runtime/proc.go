@@ -1467,6 +1467,7 @@ const (
 	stwForTestReadMemStatsSlow                      // "ReadMemStatsSlow (test)"
 	stwForTestPageCachePagesLeaked                  // "PageCachePagesLeaked (test)"
 	stwForTestResetDebugLog                         // "ResetDebugLog (test)"
+	stwForTestStackScanBufsPooled                   // "StackScanBufsPooled (test)"
 )
 
 func (r stwReason) String() string {
@@ -1498,6 +1499,7 @@ var stwReasonStrings = [...]string{
 	stwForTestReadMemStatsSlow:     "ReadMemStatsSlow (test)",
 	stwForTestPageCachePagesLeaked: "PageCachePagesLeaked (test)",
 	stwForTestResetDebugLog:        "ResetDebugLog (test)",
+	stwForTestStackScanBufsPooled:  "StackScanBufsPooled (test)",
 }
 
 // worldStop provides context from the stop-the-world required by the
@@ -6027,8 +6029,10 @@ func (pp *p) destroy() {
 		println("runtime: p id", pp.id, "destroyed during GC phase", phase)
 		throw("P destroyed while GC is running")
 	}
-	// We should free the queues though.
+	// We should free the queues and the stack scan buffer pool though.
 	pp.gcw.spanq.destroy()
+	for pp.gcw.stackBufs.free(1) != 0 {
+	}
 
 	clear(pp.sudogbuf[:])
 	pp.sudogcache = pp.sudogbuf[:0]

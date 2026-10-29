@@ -320,6 +320,9 @@ func bgsweep(c chan int) {
 			// N.B. freeSomeWbufs is already batched internally.
 			goschedIfBusy()
 		}
+		for freeSomeStackScanBufs(true) {
+			goschedIfBusy()
+		}
 		freeDeadSpanSPMCs()
 		lock(&sweep.lock)
 		if !isSweepDone() {
